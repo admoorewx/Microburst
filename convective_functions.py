@@ -589,7 +589,7 @@ def read_snd(path,use_uv=True,use_omega=False):
     f.close()
     if len(data["pres"]) < min_lines:
         print(f"WARNING: Not enough valid data in file {path}")
-        return pd.DataFame()
+        return pd.DataFrame()
     else:
         if use_uv:
             # if use_uv, find u and v then remove the wspd and wdir items
@@ -940,4 +940,111 @@ def dry_entrain_est(temp,dewp,u,v):
         value = (100.0 - RHmean) * BWDmean.magnitude
         dry_entrain.append(value)
     return dry_entrain
-########################################################################################################################
+################################################################################################################
+def composite_param_from_sounding(df):
+    """
+    This is a test composite parameter. The input is a dataframe
+    containing a single sounding profile with the format: 
+    [pres(hPa), hght (meters), temp (C), dewp (C), U (m/s), V (m/s)]
+    Output is a single non-dimensional value representing the potential for severe wet
+    microbust. Values can range from zero to (theoretically) infinity, 
+    but are typically less than 10.
+    """
+    # Filters
+    max_bulk_shear = 12.0 # Maximum allowed 0-6 km bulk shear in m/s
+    min_dewp_depress = 7.5 # Minimum allowed dewp. depression (C)
+    # Normalizing Factors
+    temp_factor = 30.0 # C
+    lr_factor = 7.5 # K/km
+    wind_factor = 10.0 # m/s
+    cin_additive = 50.0 # J/kg
+    cin_factor = 25.0 # J/kg
+    el_p_factor = 170.0 # hPa
+    el_t_factor = -60.0 # C
+    lfc_t_factor = 15.0 # C
+
+    # Get profile data from dataframe
+    pres = df["pres"].values * units.hPa
+    height = df["hght"].values * units.meter 
+    temp = df["temp"].values * units.degC 
+    dewp = df["dewp"].values * units.degC 
+    u = df["u"].values * units('m/s')
+    v = df["v"].values * units('m/s')
+
+    # Find MLCIN 
+    mlcape, mlcin = getCape("mixed-layer",pres,temp,dewp)
+
+    # Get 0-3 km max wind 
+    max_wind_3km = max_layer_wind_speed(height,u,v,bottom=0.0,top=3000.0)
+
+    # Find 0-3 km lapse rate 
+    lr3km = lapse_rate(height,temp)
+
+    # Find 0-6 km bulk shear
+    BS6km = bulk_shear_magnitude(pres, height, u, v, depth=6000)
+
+    # Get surface temperature 
+    surface_temp = temp[0]
+
+    # Get dewpoint depression
+    dewp_depress = surface_temp - dewp[0]
+
+    # Find ML EL temp, pres and LFC temp
+    ml_lcl_p, ml_lcl_t, ml_lfc_p, ml_lfc_t, ml_el_p, ml_el_t = getParcelInfo("mixed-layer",pres,temp,dewp)
+
+    # Just get the magnitudes of all params
+    mlcin = mlcin.magnitude
+    max_wind_3km = max_wind_3km.magnitude
+    BS6km = BS6km.magnitude
+    surface_temp = surface_temp.magnitude
+    dewp_depress = dewp_depress.magnitude
+    ml_el_t = ml_el_t.magnitude
+    ml_el_p = ml_el_p.magnitude
+    ml_lfc_t = ml_lfc_t.magnitude
+
+    # Apply initial filters
+    if BS6km < 12.0: 
+        bs_filter = 1.0
+    else: 
+        bs_filter = 0.0
+    if dewp_depress >= min_dewp_depress: 
+        dd_filter = 1.0
+    else:
+        dd_filter = 0.0
+
+    # Normalize
+    mlcin = (cin_additive + mlcin)/cin_factor
+    surface_temp = surface_temp/temp_factor
+    max_wind_3km = max_wind_3km/wind_factor
+    ml_el_t = ml_el_t/el_t_factor
+    ml_el_p = el_p_factor/ml_el_p
+    ml_lfc_t = ml_lfc_t/lfc_t_factor
+    lr3km = lr3km/lr_factor
+
+    # Do final checks
+    if mlcin < 0.0:
+        mlcin = 0.0
+    if ml_el_t < 0.0:
+        ml_el_t = 0.0
+    if surface_temp < 0.0:
+        surface_temp = 0.0
+    if ml_lfc_t < 0.0:
+        ml_lfc_t = 0.0
+    # Check for nans in the EL/LFC data. This happens if these levels cannot be computed.
+    if np.isnan(ml_el_p):
+        ml_el_p = 0.0
+    if np.isnan(ml_el_t):
+        ml_el_t = 0.0
+    if np.isnan(ml_lfc_t):
+        ml_lfc_t = 0.0
+
+    values = [surface_temp, max_wind_3km, ml_el_t, ml_el_p, ml_lfc_t, mlcin, bs_filter, dd_filter]
+    composite = surface_temp * max_wind_3km  * ml_el_p * ml_el_t  * ml_lfc_t * mlcin * bs_filter * dd_filter * lr3km
+    if composite < 0.0 or np.isnan(composite):
+        print("WARNING: Something went wrong with parameter calculation:")
+        print(values)
+    return composite
+################################################################################################################
+
+################################################################################################################
+################################################################################################################
